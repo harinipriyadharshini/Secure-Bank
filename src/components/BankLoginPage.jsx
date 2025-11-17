@@ -1,7 +1,11 @@
+// BankLoginPage.jsx - Copy this ENTIRE file to src/components/BankLoginPage.jsx
+
 import React, { useState } from 'react';
 import { Eye, EyeOff, User, Lock, ArrowRight, Shield, Mic, CreditCard } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 
 export default function BankLoginPage() {
+  const navigate = useNavigate();
   const [accountNumber, setAccountNumber] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -9,7 +13,7 @@ export default function BankLoginPage() {
   const handleLogin = () => {
     if (accountNumber && password) {
       console.log('Login attempt:', { accountNumber, password });
-      alert('Login successful! (This is just frontend demo)');
+      navigate('/verify');
     } else {
       alert('Please enter both account number and password');
     }
