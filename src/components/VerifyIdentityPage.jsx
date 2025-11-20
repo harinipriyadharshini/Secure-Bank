@@ -1,9 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Shield, ArrowRight, RotateCcw, CreditCard } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { Shield, ArrowRight, RotateCcw, CreditCard, ArrowLeft } from 'lucide-react';
 
-export default function VerifyIdentityPage() {
-  const navigate = useNavigate();
+export default function VerifyIdentityPage({ onNavigate, onVerified }) {
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
   const inputRefs = useRef([]);
 
@@ -50,10 +48,7 @@ export default function VerifyIdentityPage() {
   const handleSubmit = () => {
     const otpCode = otp.join('');
     if (otpCode.length === 6) {
-      console.log('OTP submitted:', otpCode);
-      alert('OTP Verified Successfully! (This is just a frontend demo)');
-      // Navigate to dashboard or home
-      // navigate('/dashboard');
+      onVerified?.();
     } else {
       alert('Please enter complete 6-digit code');
     }
@@ -76,6 +71,13 @@ export default function VerifyIdentityPage() {
       </div>
 
       <div className="w-full max-w-7xl flex flex-col lg:flex-row items-center gap-12 relative z-10">
+        <button
+          onClick={() => onNavigate('login')}
+          className="absolute top-0 left-0 flex items-center gap-2 text-teal-700 font-semibold hover:text-teal-800"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          Back to Login
+        </button>
         
         <div className="flex-1 text-center lg:text-left space-y-10">
           
