@@ -16,6 +16,7 @@ export default function App() {
   const [currentPage, setCurrentPage] = useState("login");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [showVoiceAssistant, setShowVoiceAssistant] = useState(false);
+  const [userId, setUserId] = useState(1); // Default to user 1
 
   const protectedPages = new Set([
     "home",
@@ -57,7 +58,7 @@ export default function App() {
 
     switch (currentPage) {
       case "login":
-        return <LoginPage onNavigate={handleNavigate} />;
+        return <LoginPage onNavigate={handleNavigate} setUserId={setUserId} />;
       case "register":
         return <RegisterPage onNavigate={handleNavigate} />;
       case "verify":
@@ -102,8 +103,9 @@ export default function App() {
       <VoiceAssistant
         show={showVoiceAssistant}
         onClose={() => setShowVoiceAssistant(false)}
+        onNavigate={handleNavigate}
+        userId={userId}
       />
     </div>
   );
 }
-

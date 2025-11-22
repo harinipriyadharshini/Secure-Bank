@@ -1,95 +1,216 @@
 # backend/main.py
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from nlu.wit_client import parse_text_with_wit
+from typing import Optional
+from nlu.deepseek_service import deepseek_nlu
 from services.balance_services import get_account_balance
-from services.transfer_service import send_money
-from services.history_service import get_transaction_history
+from services.transfer_service import send_money, verify_receiver_exists
+from services.history_service import get_transaction_history, format_transactions
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("assistant")
+logger = logging.getLogger("banking-assistant")
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['http://localhost:5173'],
+    allow_origins=["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
+
 
 class Query(BaseModel):
     user_id: int
     message: str
+    password: Optional[str] = None
 
-CONFIDENCE_THRESHOLD = 0.55  # tune this
 
-def extract_amount(entities: dict):
-    # try the common Wit keys for money/amount
-    candidates = [
-        ("wit$amount_of_money:amount", "amount"),
-        ("wit$amount:amount", "value"),
-        ("amount_of_money:amount", "amount"),
-        ("number:number", "value"),
-    ]
-    for key, subkey in candidates:
-        if key in entities and isinstance(entities[key], list) and len(entities[key])>0:
-            return entities[key][0].get(subkey) or entities[key][0].get("value")
-    return None
+class TestQuery(BaseModel):
+    message: str
 
-def extract_receiver(entities: dict):
-    # custom entity "receiver" could be named differently; check several keys
-    for key in ["receiver:receiver", "contact:contact", "contact:person", "wit$contact:contact"]:
-        if key in entities and isinstance(entities[key], list) and len(entities[key])>0:
-            return entities[key][0].get("value")
-    return None
+
+CONFIDENCE_THRESHOLD = 0.6
+
 
 @app.post("/assistant")
 def process_text(data: Query):
-    # Log the incoming text (very important for debugging STT problems)
-    logger.info("Incoming text from frontend: %s", data.message)
+    logger.info("User %d: %s", data.user_id, data.message)
 
-    nlu = parse_text_with_wit(data.message)
-    if nlu.get("error"):
-        logger.error("Wit API error: %s", nlu)
-        raise HTTPException(status_code=502, detail="Wit.ai error")
+    # Validate user exists
+    from database import db
 
-    logger.info("Wit response: %s", nlu)
+    if data.user_id not in db:
+        return {
+            "reply": "User not found. Please log in again.",
+            "confidence": 0,
+            "source": "system",
+            "page": None,
+        }
 
-    intents = nlu.get("intents", [])
-    top_intent = intents[0] if intents else None
-    intent_name = top_intent.get("name") if top_intent else None
-    intent_conf = top_intent.get("confidence", 0) if top_intent else 0
+    # Process with DeepSeek
+    nlu_result = deepseek_nlu.classify_intent(data.message)
 
-    logger.info("Top intent: %s (conf=%s)", intent_name, intent_conf)
+    intent_name = nlu_result.get("intent")
+    confidence = nlu_result.get("confidence", 0)
+    amount = nlu_result.get("amount")
+    receiver = nlu_result.get("receiver")
+    transaction_count = nlu_result.get("transaction_count")
 
-    # low confidence -> ask for clarification
-    if not intent_name or intent_conf < CONFIDENCE_THRESHOLD:
-        return {"reply": "I didn't understand. Could you please rephrase or be more specific?"}
+    logger.info("DeepSeek result: %s (conf: %s)", intent_name, confidence)
 
-    entities = nlu.get("entities", {})
+    # Low confidence handling
+    if intent_name == "unknown" or confidence < CONFIDENCE_THRESHOLD:
+        return {
+            "reply": "I'm not sure what you want to do. I can help you: check balance, send money, or show transactions.",
+            "confidence": confidence,
+            "source": "deepseek",
+            "page": None,
+            "data": {"require_password": False},
+        }
 
+    # Handle intents
     if intent_name == "check_balance":
-        return {"reply": get_account_balance(data.user_id)}
+        balance_data = get_account_balance(data.user_id)
+        if not balance_data:
+            return {
+                "reply": "Unable to retrieve balance.",
+                "confidence": 0,
+                "source": "system",
+                "page": None,
+                "data": {"require_password": False},
+            }
 
-    if intent_name == "send_money":
-        amount = extract_amount(entities)
-        receiver = extract_receiver(entities)
-        if amount is None or receiver is None:
-            return {"reply": "I need the amount and the recipient to send money. For example: 'Send 500 rupees to John.'"}
+        return {
+            "reply": balance_data["message"],
+            "confidence": confidence,
+            "source": "deepseek",
+            "page": "home",
+            "data": {"require_password": False, "balance": balance_data["balance"]},
+        }
+
+    elif intent_name == "send_money":
+        # Validate amount and receiver
+        if not amount or not receiver:
+            missing = []
+            if not amount:
+                missing.append("amount")
+            if not receiver:
+                missing.append("recipient")
+            return {
+                "reply": f"I need the {' and '.join(missing)} to send money. Example: 'Send 500 to Ravi'",
+                "confidence": confidence,
+                "source": "deepseek",
+                "page": None,
+                "data": {"require_password": False},
+            }
+
         try:
-            amount_val = int(float(amount))
-        except Exception:
-            return {"reply": f"Couldn't parse the amount: {amount}. Please say a number like '500'."}
-        return {"reply": send_money(data.user_id, amount_val, receiver)}
+            amount_val = int(amount)
+            if amount_val <= 0:
+                return {
+                    "reply": "Amount must be positive.",
+                    "confidence": confidence,
+                    "source": "deepseek",
+                    "page": None,
+                    "data": {"require_password": False},
+                }
 
-    if intent_name == "transaction_history":
-        # optionally check for date ranges in entities...
-        history = get_transaction_history(data.user_id)
-        return {"reply": "\n".join(history)}
+            # Check if receiver exists first
+            if not verify_receiver_exists(receiver):
+                return {
+                    "reply": f"I can't find '{receiver}' in the system. Available contacts: Ravi, Jane, John, Mom, Mike.",
+                    "confidence": confidence,
+                    "source": "deepseek",
+                    "page": None,
+                    "data": {"require_password": False},
+                }
 
-    # default fallback (shouldn't hit because of confidence check above)
-    return {"reply": "I didn't understand. Can you please repeat?"}
+            # Process transaction
+            transfer_result = send_money(
+                data.user_id, amount_val, receiver, data.password
+            )
+
+            return {
+                "reply": transfer_result["message"],
+                "confidence": confidence,
+                "source": "deepseek",
+                "page": transfer_result["page"],
+                "data": {
+                    "require_password": transfer_result["require_password"],
+                    "success": transfer_result["success"],
+                    "balance": transfer_result.get("balance"),
+                },
+            }
+
+        except ValueError:
+            return {
+                "reply": f"Invalid amount: {amount}. Please use numbers only.",
+                "confidence": confidence,
+                "source": "deepseek",
+                "page": None,
+                "data": {"require_password": False},
+            }
+
+    elif intent_name == "transaction_history":
+        transactions = get_transaction_history(data.user_id, transaction_count)
+
+        if not transactions:
+            return {
+                "reply": "No transactions found.",
+                "confidence": confidence,
+                "source": "deepseek",
+                "page": None,
+                "data": {"require_password": False},
+            }
+
+        # Format for voice output
+        formatted_reply = format_transactions(transactions, transaction_count)
+
+        return {
+            "reply": formatted_reply,
+            "confidence": confidence,
+            "source": "deepseek",
+            "page": "statements",
+            "data": {
+                "require_password": False,
+                "transaction_count": len(transactions),
+                "transactions": transactions,
+            },
+        }
+
+    else:
+        return {
+            "reply": "I can help you check balance, send money, or show transactions.",
+            "confidence": confidence,
+            "source": "deepseek",
+            "page": None,
+            "data": {"require_password": False},
+        }
+
+
+@app.post("/test-nlu")
+def test_nlu(data: TestQuery):
+    """Test DeepSeek NLU processing"""
+    result = deepseek_nlu.classify_intent(data.message)
+    return {"input": data.message, "result": result}
+
+
+@app.get("/test-nlu-get")
+def test_nlu_get(message: str = "check my balance"):
+    """GET endpoint for quick testing"""
+    result = deepseek_nlu.classify_intent(message)
+    return {"input": message, "result": result}
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "service": "deepseek-banking-assistant"}
+
+
+@app.get("/")
+def root():
+    return {"message": "Banking Assistant API with DeepSeek"}
